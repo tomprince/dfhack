@@ -172,7 +172,7 @@ IF(UNIX)
   add_definitions(-DLINUX_BUILD)
   find_library(X11_LIBRARY X11)
   SET(CMAKE_CXX_FLAGS_DEBUG "-g -Wall")
-  SET(CMAKE_CXX_FLAGS "-fvisibility=hidden")
+  SET(CMAKE_CXX_FLAGS "-fvisibility=hidden -std=c++0x")
 
   SET(PROJECT_LIBS ${X11_LIBRARY} rt )
 ELSE()

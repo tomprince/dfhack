@@ -157,6 +157,11 @@ namespace DFHack
             /// write an arbitrary amount of bytes
             virtual void write(uint32_t address, uint32_t length, uint8_t* buffer) = 0;
 
+            template <typename T>
+            T read(uint32_t address);
+            template <typename T>
+            void write(uint32_t address, T t);
+
             /// read an STL string
             virtual const std::string readSTLString (uint32_t offset) = 0;
             /// read an STL string
@@ -211,5 +216,22 @@ namespace DFHack
             virtual bool SetAndWait (uint32_t state) = 0;
     };
 
+    template <>
+    inline uint32_t Process::read(uint32_t address)
+    {
+            return readDWord(address);
+    }
+
+    template <>
+    inline uint16_t Process::read(uint32_t address)
+    {
+            return readWord(address);
+    }
+
+    template <>
+    inline int16_t Process::read(uint32_t address)
+    {
+            return readWord(address);
+    }
 }
 #endif

@@ -47,32 +47,135 @@ Module* DFHack::createItems(DFContextShared * d)
     return new Items(d);
 }
 
-enum accessor_type {ACCESSOR_CONSTANT, ACCESSOR_INDIRECT, ACCESSOR_DOUBLE_INDIRECT};
-
 /* this is used to store data about the way accessors work */
-class DFHACK_EXPORT Accessor
+class Accessor
 {
-public:
-    enum DataWidth {
-        Data32 = 0,
-        DataSigned16,
-        DataUnsigned16
-    };
 private:
-    accessor_type type;
-    int32_t constant;
-    int32_t offset1;
-    int32_t offset2;
-    Process * p;
-    DataWidth dataWidth;
     uint32_t method;
 public:
-    Accessor(uint32_t function, Process * p);
-    Accessor(accessor_type type, int32_t constant, uint32_t offset1, uint32_t offset2, uint32_t dataWidth, Process * p);
-    std::string dump();
-    int32_t getValue(uint32_t objectPtr);
-    bool isConstant();
+    Accessor(uint32_t method);
+    virtual std::string dump() = 0;
+    virtual int32_t getValue(uint32_t objectPtr) = 0;
+    virtual bool isConstant();
+    virtual ~Accessor();
 };
+
+Accessor::Accessor(uint32_t method)
+        : method(method)
+{
+}
+
+Accessor::~Accessor()
+{
+}
+
+std::string Accessor::dump()
+{
+    stringstream sstr;
+    sstr << hex << "method @0x" << method;
+    return sstr.str();
+}
+
+bool Accessor::isConstant()
+{
+    return false;
+}
+
+template <typename T>
+class IndirectAccessor : public Accessor
+{
+private:
+    Process* p;
+    std::vector<uint32_t> offsets;
+public:
+    template <typename... A>
+    IndirectAccessor(uint32_t method, Process* p, A... offsets);
+    virtual ~IndirectAccessor();
+    virtual std::string dump();
+    virtual int32_t getValue(uint32_t objectPtr);
+};
+
+template <typename T>
+template <typename... A>
+IndirectAccessor<T>::IndirectAccessor(uint32_t method, Process* p, A... offsets)
+	: Accessor(method), p(p), offsets{offsets...}
+{
+}
+
+template <typename T>
+IndirectAccessor<T>::~IndirectAccessor()
+{
+}
+
+template <typename T>
+std::string IndirectAccessor<T>::dump()
+{
+    stringstream sstr;
+    sstr << Accessor::dump() << " ";
+    // FIXME: Size
+    for (size_t i = 0; i < offsets.size(); ++i) {
+         sstr << "[ ";
+    }
+    sstr << "obj +" << hex;
+    for (size_t i = 0; i < offsets.size(); ++i) {
+        sstr << " 0x" << offsets[i] << " ]";
+    }
+    return sstr.str();
+}
+
+template <typename T>
+int32_t IndirectAccessor<T>::getValue(uint32_t objectPtr)
+{
+    for (size_t i = 0; i < offsets.size() - 1; ++i) {
+            objectPtr = p->readDWord(objectPtr + offsets[i]);
+    }
+    return p->read<T>(objectPtr + offsets[offsets.size()]);
+}
+
+class ConstantAccessor : public Accessor
+{
+private:
+    uint32_t constant;
+public:
+    ConstantAccessor(uint32_t method, uint32_t contant);
+    virtual ~ConstantAccessor();
+    virtual std::string dump();
+    virtual bool isConstant();
+    virtual int32_t getValue(uint32_t objectPtr);
+};
+
+ConstantAccessor::ConstantAccessor(uint32_t method, uint32_t constant)
+    : Accessor(method), constant(constant)
+{
+}
+
+ConstantAccessor::~ConstantAccessor()
+{
+}
+
+std::string ConstantAccessor::dump()
+{
+    stringstream sstr;
+    sstr << Accessor::dump() << " Constant: " << dec << constant;
+    return sstr.str();
+}
+
+int32_t ConstantAccessor::getValue(uint32_t objectPtr)
+{
+    return constant;
+}
+
+bool ConstantAccessor::isConstant()
+{
+    return true;
+}
+
+enum DataWidth {
+    Data32 = 0,
+    DataSigned16,
+    DataUnsigned16
+};
+
 class DFHACK_EXPORT ItemImprovementDesc
 {
 private:
@@ -115,7 +218,7 @@ inline bool do_match(uint32_t &ptr, uint64_t val, int size, uint64_t mask, uint6
     return false;
 }
 
-static bool match_MEM_ACCESS(uint32_t &ptr, uint64_t v, int isize, int in_reg, int &out_reg, int &offset)
+static bool match_MEM_ACCESS(uint32_t &ptr, uint64_t v, int isize, int in_reg, int &out_reg, uint32_t &offset)
 {
     // ESP & EBP are hairy
     if (in_reg == 4 || in_reg == 5)
@@ -144,10 +247,10 @@ static bool match_MEM_ACCESS(uint32_t &ptr, uint64_t v, int isize, int in_reg, i
     }
 }
 
-static bool match_MOV_MEM(uint32_t &ptr, uint64_t v, int in_reg, int &out_reg, int &offset, Accessor::DataWidth &size) 
+static bool match_MOV_MEM(uint32_t &ptr, uint64_t v, int in_reg, int &out_reg, uint32_t &offset, DataWidth &size)
 {
     int prefix = 0;
-    size = Accessor::Data32;
+    size = Data32;
     if ((v & 0xFF) == 0x8B) { // MOV
         v >>= 8;
         prefix = 1;
@@ -155,17 +258,17 @@ static bool match_MOV_MEM(uint32_t &ptr, uint64_t v, int in_reg, int &out_reg, i
     else if ((v & 0xFFFF) == 0x8B66) { // MOV 16-bit
         v >>= 16;
         prefix = 2;
-        size = Accessor::DataUnsigned16;
+        size = DataUnsigned16;
     }
     else if ((v & 0xFFFF) == 0xBF0F) { // MOVSX
         v >>= 16;
         prefix = 2;
-        size = Accessor::DataSigned16;
+        size = DataSigned16;
     }
     else if ((v & 0xFFFF) == 0xB70F) { // MOVZ
         v >>= 16;
         prefix = 2;
-        size = Accessor::DataUnsigned16;
+        size = DataUnsigned16;
     }
     else
         return false;
@@ -173,35 +276,33 @@ static bool match_MOV_MEM(uint32_t &ptr, uint64_t v, int in_reg, int &out_reg, i
     return match_MEM_ACCESS(ptr, v, prefix, in_reg, out_reg, offset);
 }
 
-Accessor::Accessor(uint32_t function, Process *p)
+Accessor* buildAccessor(uint32_t function, Process *p)
 {
-    this->p = p;
-    this->type = ACCESSOR_CONSTANT;
-    if(!p)
+    if (!p)
     {
-        this->constant = 0;
-        return;
+        return new ConstantAccessor(0, 0);
     }
-    method = function;
+    uint32_t method = function;
     uint32_t temp = function;
     int data_reg = -1;
     uint64_t v = p->readQuad(temp);
+
+    Accessor* a = nullptr;
 
     if (do_match(temp, v, 2, 0xFFFF, 0xC033) ||
         do_match(temp, v, 2, 0xFFFF, 0xC031)) // XOR EAX, EAX
     {
         data_reg = 0;
-        this->constant = 0;
+        a = new ConstantAccessor(method, 0);
     }
     else if (do_match(temp, v, 3, 0xFFFFFF, 0xFFC883)) // OR EAX, -1
     {
         data_reg = 0;
-        this->constant = -1;
+        a = new ConstantAccessor(method, -1);
     }
     else if (do_match(temp, v, 5, 0xFF, 0xB8)) // MOV EAX,imm
     {
-        data_reg = 0;
-        this->constant = (v>>8) & 0xFFFFFFFF;
+        data_reg = 0;a = new ConstantAccessor(method, (v>>8) & 0xFFFFFFFF);
     }
     else
     {
@@ -215,20 +316,42 @@ Accessor::Accessor(uint32_t function, Process *p)
             v = p->readQuad(temp);
         }
 
-        if (match_MOV_MEM(temp, v, ptr_reg, tmp, this->offset1, xsize)) {
+        uint32_t offset;
+        if (match_MOV_MEM(temp, v, ptr_reg, tmp, offset, xsize)) {
             data_reg = tmp;
-            this->type = ACCESSOR_INDIRECT;
-            this->dataWidth = xsize;
 
-            if (xsize == Data32)
-            {
+            switch (xsize) {
+            case Data32:
                 v = p->readQuad(temp);
 
-                if (match_MOV_MEM(temp, v, data_reg, tmp, this->offset2, xsize)) {
+                uint32_t offset2;
+                if (match_MOV_MEM(temp, v, data_reg, tmp, offset2, xsize)) {
                     data_reg = tmp;
-                    this->type = ACCESSOR_DOUBLE_INDIRECT;
-                    this->dataWidth = xsize;
+                    switch (xsize) {
+                    case Data32:
+                            a = new IndirectAccessor<uint32_t>(method, p, offset, offset2);
+                            break;
+                    case DataSigned16:
+                            a = new IndirectAccessor<int16_t>(method, p, offset, offset2);
+                            break;
+                    case DataUnsigned16:
+                            a = new IndirectAccessor<uint16_t>(method, p, offset, offset2);
+                            break;
+                    default:
+                            abort();
+                    }
                 }
+                else {
+                    a = new IndirectAccessor<uint32_t>(method, p, offset);
+                }
+            case DataSigned16:
+                a = new IndirectAccessor<int16_t>(method, p, offset);
+                break;
+            case DataUnsigned16:
+                a = new IndirectAccessor<uint16_t>(method, p, offset);
+                break;
+            default:
+                abort();
             }
         }
     }
@@ -236,100 +359,12 @@ Accessor::Accessor(uint32_t function, Process *p)
     v = p->readQuad(temp);
 
     if (data_reg == 0 && do_match(temp, v, 1, 0xFF, 0xC3)) // RET
-        return;
+        return a;
     else
     {
-        this->type = ACCESSOR_CONSTANT;
-        this->constant = 0;
+        delete a;
         printf("bad accessor @0x%x\n", function);
-    }
-}
-
-bool Accessor::isConstant()
-{
-    if(this->type == ACCESSOR_CONSTANT)
-        return true;
-    else
-        return false;
-}
-
-string Accessor::dump()
-{
-    stringstream sstr;
-    sstr << hex << "method @0x" << method << dec << " ";
-    switch(type)
-    {
-        case ACCESSOR_CONSTANT:
-            sstr << "Constant: " << dec << constant;
-            break;
-        case ACCESSOR_INDIRECT:
-            switch(dataWidth)
-            {
-                case Data32:
-                    sstr << "int32_t ";
-                    break;
-                case DataSigned16:
-                    sstr << "int16_t ";
-                    break;
-                case DataUnsigned16:
-                    sstr << "uint16_t ";
-                    break;
-                default:
-                    sstr << "unknown ";
-                    break;
-            }
-            sstr << hex << "[obj + 0x" << offset1 << " ]";
-            break;
-        case ACCESSOR_DOUBLE_INDIRECT:
-            switch(dataWidth)
-            {
-                case Data32:
-                    sstr << "int32_t ";
-                    break;
-                case DataSigned16:
-                    sstr << "int16_t ";
-                    break;
-                case DataUnsigned16:
-                    sstr << "uint16_t ";
-                    break;
-                default:
-                    sstr << "unknown ";
-                    break;
-            }
-            sstr << hex << "[ [obj + 0x" << offset1 << " ] + 0x" << offset2 << " ]";
-            break;
-    }
-    return sstr.str();
-}
-
-int32_t Accessor::getValue(uint32_t objectPtr)
-{
-    int32_t offset = this->offset1;
-
-    switch(this->type)
-    {
-    case ACCESSOR_CONSTANT:
-        return this->constant;
-        break;
-    case ACCESSOR_DOUBLE_INDIRECT:
-        objectPtr = p->readDWord(objectPtr + this->offset1);
-        offset = this->offset2;
-        // fallthrough
-    case ACCESSOR_INDIRECT:
-        switch(this->dataWidth)
-        {
-        case Data32:
-            return p->readDWord(objectPtr + offset);
-        case DataSigned16:
-            return (int16_t) p->readWord(objectPtr + offset);
-        case DataUnsigned16:
-            return (uint16_t) p->readWord(objectPtr + offset);
-        default:
-            return -1;
-        }
-        break;
-    default:
-        return -1;
+        return new ConstantAccessor(method, -1);
     }
 }
 
@@ -339,12 +374,12 @@ Accessor * buildAccessor (OffsetGroup * I, Process * p, const char * name, uint3
     int32_t offset;
     if(I->getSafeOffset(name,offset))
     {
-        return new Accessor( p->readDWord( vtable + offset ), p);
+        return buildAccessor( p->readDWord( vtable + offset ), p);
     }
     else
     {
         fprintf(stderr,"Missing offset for item accessor \"%s\"\n", name);
-        return new Accessor(-1,0); // dummy accessor. always returns -1
+        return new ConstantAccessor(-1,-1); // dummy accessor. always returns -1
     }
 }
 
